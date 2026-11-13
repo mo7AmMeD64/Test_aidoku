@@ -1,0 +1,79 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Build APK
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          echo "SDK: $SDK"
+          PLATFORM=$(ls -d "$SDK"/platforms/android-* | sort -V | tail -1)
+          BUILD_TOOLS=$(ls -d "$SDK"/build-tools/* | sort -V | tail -1)
+          echo "platform: $PLATFORM"
+          echo "build-tools: $BUILD_TOOLS"
+          ANDROID_JAR="$PLATFORM/android.jar"
+
+          rm -rf build
+          mkdir -p build/classes build/dex build/gen
+
+          # resources
+          "$BUILD_TOOLS/aapt2" compile --dir app/res -o build/res.zip
+          "$BUILD_TOOLS/aapt2" link \
+            -o build/base.apk \
+            -I "$ANDROID_JAR" \
+            --manifest app/AndroidManifest.xml \
+            -R build/res.zip \
+            --java build/gen \
+            --min-sdk-version 26 \
+            --target-sdk-version 33
+
+          # java
+          javac --release 11 -encoding UTF-8 \
+            -classpath "$ANDROID_JAR:libs/jsoup-1.17.2.jar" \
+            -d build/classes \
+            app/src/dev/teamx/reader/*.java
+
+          # dex
+          "$BUILD_TOOLS/d8" --lib "$ANDROID_JAR" --release --min-api 26 \
+            --output build/dex \
+            $(find build/classes -name '*.class') \
+            libs/jsoup-1.17.2.jar
+
+          # package dex
+          cd build
+          cp base.apk unsigned.apk
+          zip -q -j unsigned.apk dex/classes.dex
+          cd ..
+
+          # align + sign with a throwaway debug key
+          keytool -genkeypair -keystore build/debug.keystore -alias androiddebugkey \
+            -storepass android -keypass android \
+            -dname "CN=Android Debug,O=Android,C=US" \
+            -keyalg RSA -keysize 2048 -validity 10000
+          "$BUILD_TOOLS/zipalign" -f 4 build/unsigned.apk build/aligned.apk
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks build/debug.keystore \
+            --ks-pass pass:android --key-pass pass:android \
+            --out TeamXReader.apk build/aligned.apk
+
+          "$BUILD_TOOLS/apksigner" verify --print-certs TeamXReader.apk
+          "$BUILD_TOOLS/aapt2" dump badging TeamXReader.apk | head -5
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TeamXReader
+          path: TeamXReader.apk
