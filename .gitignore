@@ -2,3 +2,4 @@ build/
 *.apk
 *.keystore
 .gradle/
+*.idsig
